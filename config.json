@@ -1,0 +1,14 @@
+{
+  "storage": { "root": "./data" },
+  "thread_pool": { "max_workers": 3, "shutdown_timeout_seconds": 30 },
+  "finalizer": {
+    "staging_pending_threshold": 10,
+    "finalizer_interval_minutes": 5
+  },
+  "download": { "retries": 3, "timeout_seconds": 60, "progress_enabled": true },
+  "logger": { "dir_name": "logs" },
+  "browser": { "headless": false },
+  "apkpure": { "load_more_count": 1 },
+  "source_weights": { "apkmirror": 3, "uptodown": 2, "apkpure": 1 },
+  "download_number": 3
+}
