@@ -1,7 +1,6 @@
 import json
 from pathlib import Path
 from typing import Any
-
 from .paths import StoragePaths
 from ..utils import atomic_write, file_lock
 

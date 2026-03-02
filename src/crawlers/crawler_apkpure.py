@@ -4,20 +4,19 @@ from pathlib import Path
 from playwright.sync_api import sync_playwright
 from config import get_config
 from src.crawlers.base import BaseCrawler
+from src.crawlers.common import (
+    BROWSER_ARGS,
+    USER_AGENT,
+    TIMEOUT_LOAD_STATE_MS,
+    TIMEOUT_NAVIGATION_MS,
+    TIMEOUT_SELECTOR_MS,
+    TIMEOUT_SHORT_MS,
+)
+from src.exception import CrawlerDownloadError, CrawlerPageError
 from src.utils import hash_file
 
 BASE = "https://apkpure.com"
 SEARCH_URL = "https://apkpure.com/search"
-BROWSER_ARGS = [
-    "--disable-blink-features=AutomationControlled",
-    "--no-sandbox",
-    "--disable-dev-shm-usage",
-    "--disable-infobars",
-    "--disable-extensions",
-    "--disable-gpu",
-    "--window-size=1920,1080",
-]
-USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 STEALTH_JS = """
 () => {
     Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
@@ -131,13 +130,13 @@ def _handle_download_page_ads(page, download_page_url: str) -> bool:
         return True
     for attempt in range(MAX_BACK_ATTEMPTS):
         try:
-            page.go_back(timeout=5000)
+            page.go_back(timeout=TIMEOUT_SHORT_MS)
             time.sleep(0.5)
             if "/download" in page.url and "apkpure" in page.url:
                 time.sleep(1)
                 if not _is_download_button_blocked(page):
                     return True
-            page.goto(download_page_url, wait_until="domcontentloaded", timeout=15000)
+            page.goto(download_page_url, wait_until="domcontentloaded", timeout=TIMEOUT_SELECTOR_MS)
             time.sleep(AD_WAIT_TIME)
             if not _is_download_button_blocked(page):
                 return True
@@ -207,7 +206,7 @@ def _click_latest_tab(page) -> None:
     )
     if latest_tab.count():
         latest_tab.click()
-        page.wait_for_load_state("domcontentloaded", timeout=10000)
+        page.wait_for_load_state("domcontentloaded", timeout=TIMEOUT_LOAD_STATE_MS)
     time.sleep(2)
 
 
@@ -330,8 +329,8 @@ def _click_load_more(page) -> bool:
 
 
 class APKPureCrawler(BaseCrawler):
-    def __init__(self, staging, logger):
-        super().__init__("apkpure", staging, logger)
+    def __init__(self, storage, logger):
+        super().__init__("apkpure", storage, logger)
 
     def resolve_download_url(self, app_id: str, version: str, slug: str | None = None, **kwargs: object) -> tuple[str, dict[str, str]]:
     # For compatibility only: returns direct URL. Prefer fetch() which uses Playwright expect_download + click.
@@ -348,28 +347,28 @@ class APKPureCrawler(BaseCrawler):
                 if slug:
                     href = f"{BASE.rstrip('/')}/{slug}/{app_id}"
                 else:
-                    page.goto(f"{SEARCH_URL}?q={app_id}", wait_until="domcontentloaded", timeout=30000)
-                    page.wait_for_load_state("load", timeout=10000)
+                    page.goto(f"{SEARCH_URL}?q={app_id}", wait_until="domcontentloaded", timeout=TIMEOUT_NAVIGATION_MS)
+                    page.wait_for_load_state("load", timeout=TIMEOUT_LOAD_STATE_MS)
                     time.sleep(2)
                     app_link = page.locator(f'a[href*="{app_id}"]').first
                     if not app_link.count():
                         app_link = page.locator('a[href*="/game/"][href*="."], a[href^="/"][href*="/"][href*="."]').first
                     if not app_link.count():
-                        raise RuntimeError(f"no app page found for {app_id}")
+                        raise CrawlerPageError("no app page found", source_name=self.source_name, app_id=app_id)
                     href = app_link.get_attribute("href") or ""
                     if href.startswith("/"):
                         href = BASE.rstrip("/") + href
                 download_page_url = href.rstrip("/") + "/download"
-                page.goto(download_page_url, wait_until="domcontentloaded", timeout=30000)
+                page.goto(download_page_url, wait_until="domcontentloaded", timeout=TIMEOUT_NAVIGATION_MS)
                 download_btn = _find_download_button(page)
                 if not download_btn:
-                    raise RuntimeError(f"no download-btn on download page for {app_id}")
+                    raise CrawlerPageError("no download-btn on download page", source_name=self.source_name, app_id=app_id)
                 dl_href = download_btn.get_attribute("href") or ""
                 if not dl_href:
-                    raise RuntimeError(f"download-btn has no href for {app_id}")
+                    raise CrawlerPageError("download-btn has no href", source_name=self.source_name, app_id=app_id)
                 if dl_href.startswith("/"):
                     dl_href = BASE.rstrip("/") + dl_href
-                page.goto(dl_href, wait_until="domcontentloaded", timeout=30000)
+                page.goto(dl_href, wait_until="domcontentloaded", timeout=TIMEOUT_NAVIGATION_MS)
                 final_url = page.url
                 cookies = context.cookies()
                 cookie_str = "; ".join(f"{c['name']}={c['value']}" for c in cookies)
@@ -378,7 +377,7 @@ class APKPureCrawler(BaseCrawler):
             finally:
                 browser.close()
 
-    def fetch(self, app_id: str, version: str, **kwargs: object) -> None:
+    def fetch(self, app_id: str, version: str, **kwargs: object) -> str | None:
         slug = kwargs.get("slug")
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=get_config().browser.headless, args=BROWSER_ARGS)
@@ -393,32 +392,32 @@ class APKPureCrawler(BaseCrawler):
                 if slug:
                     download_page_url = f"{BASE.rstrip('/')}/{slug}/{app_id}/download"
                 else:
-                    page.goto(f"{SEARCH_URL}?q={app_id}", wait_until="domcontentloaded", timeout=30000)
-                    page.wait_for_load_state("load", timeout=10000)
+                    page.goto(f"{SEARCH_URL}?q={app_id}", wait_until="domcontentloaded", timeout=TIMEOUT_NAVIGATION_MS)
+                    page.wait_for_load_state("load", timeout=TIMEOUT_LOAD_STATE_MS)
                     time.sleep(2)
                     app_link = page.locator(f'a[href*="{app_id}"]').first
                     if not app_link.count():
                         app_link = page.locator('a[href*="/game/"][href*="."], a[href^="/"][href*="/"][href*="."]').first
                     if not app_link.count():
-                        raise RuntimeError(f"no app page found for {app_id}")
+                        raise CrawlerPageError("no app page found", source_name=self.source_name, app_id=app_id)
                     href = app_link.get_attribute("href") or ""
                     if href.startswith("/"):
                         href = BASE.rstrip("/") + href
                     download_page_url = href.rstrip("/") + "/download"
-                page.goto(download_page_url, wait_until="domcontentloaded", timeout=30000)
-                page.wait_for_load_state("load", timeout=10000)
+                page.goto(download_page_url, wait_until="domcontentloaded", timeout=TIMEOUT_NAVIGATION_MS)
+                page.wait_for_load_state("load", timeout=TIMEOUT_LOAD_STATE_MS)
                 time.sleep(2)
                 _close_popup_dialogs(page)
                 if not _handle_download_page_ads(page, download_page_url):
-                    raise RuntimeError("download button blocked by ad after retries")
+                    raise CrawlerDownloadError("download button blocked by ad after retries", source_name=self.source_name, app_id=app_id)
                 download_btn = _find_download_button(page)
                 if not download_btn:
-                    raise RuntimeError(f"no download-btn on download page for {app_id}")
+                    raise CrawlerPageError("no download-btn on download page", source_name=self.source_name, app_id=app_id)
                 resolved_version = _extract_version_from_page(page) or version
                 download_btn.scroll_into_view_if_needed()
                 time.sleep(0.5)
-                filename = self._staging_filename(app_id, resolved_version)
-                dest_path = self._staging.apk_path(filename)
+                filename = self._apk_filename(app_id, resolved_version)
+                dest_path = self._storage.apk_path(filename)
                 dest_path.parent.mkdir(parents=True, exist_ok=True)
                 timeout_ms = int((get_config().download.timeout_seconds or 300) * 1000)
                 with page.expect_download(timeout=timeout_ms) as download_ctx:
@@ -426,9 +425,9 @@ class APKPureCrawler(BaseCrawler):
                 download = download_ctx.value
                 download.save_as(dest_path)
                 if download.failure():
-                    raise RuntimeError(str(download.failure()))
+                    raise CrawlerDownloadError(str(download.failure()), source_name=self.source_name, app_id=app_id)
                 md5_hex = hash_file(Path(dest_path))
-                self._staging.append_entry({
+                self._storage.append_entry({
                     "app_id": app_id,
                     "version": resolved_version,
                     "source": self.source_name,
@@ -436,6 +435,7 @@ class APKPureCrawler(BaseCrawler):
                     "hash": md5_hex,
                 })
                 self._logger.info(f"{self.source_name} staged {app_id} {resolved_version}")
+                return resolved_version
             finally:
                 browser.close()
 
@@ -456,14 +456,14 @@ def discover_latest_in_category(category_key: str) -> list[dict]:
         try:
             context = _category_context(browser)
             page = context.new_page()
-            page.goto(base_url, wait_until="load", timeout=30000)
+            page.goto(base_url, wait_until="load", timeout=TIMEOUT_NAVIGATION_MS)
             time.sleep(2)
             _click_latest_tab(page)
             try:
-                page.wait_for_selector(CATEGORY_LIST_SELECTOR, timeout=15000)
+                page.wait_for_selector(CATEGORY_LIST_SELECTOR, timeout=TIMEOUT_SELECTOR_MS)
             except Exception:
                 try:
-                    page.wait_for_selector("a[href*='/game/'], a[href^='/'][href*='/']", timeout=5000)
+                    page.wait_for_selector("a[href*='/game/'], a[href^='/'][href*='/']", timeout=TIMEOUT_SHORT_MS)
                 except Exception:
                     pass
             return _parse_category_page_items(page)
@@ -487,14 +487,14 @@ def get_full_game_list_for_category(category_key: str) -> list[dict]:
         try:
             context = _category_context(browser)
             page = context.new_page()
-            page.goto(base_url, wait_until="load", timeout=30000)
+            page.goto(base_url, wait_until="load", timeout=TIMEOUT_NAVIGATION_MS)
             time.sleep(2)
             _click_latest_tab(page)
             try:
-                page.wait_for_selector(CATEGORY_LIST_SELECTOR, timeout=15000)
+                page.wait_for_selector(CATEGORY_LIST_SELECTOR, timeout=TIMEOUT_SELECTOR_MS)
             except Exception:
                 try:
-                    page.wait_for_selector("a[href*='/game/'], a[href^='/'][href*='/']", timeout=5000)
+                    page.wait_for_selector("a[href*='/game/'], a[href^='/'][href*='/']", timeout=TIMEOUT_SHORT_MS)
                 except Exception:
                     pass
             _scroll_to_bottom(page)

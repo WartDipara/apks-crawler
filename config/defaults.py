@@ -1,6 +1,5 @@
 from pathlib import Path
 from typing import Any
-
 from pydantic import BaseModel, Field, field_validator
 
 
@@ -16,11 +15,6 @@ class StorageConfig(BaseModel):
 class ThreadPoolConfig(BaseModel):
     max_workers: int = Field(ge=1, le=32)
     shutdown_timeout_seconds: float = Field(ge=1.0)
-
-
-class FinalizerConfig(BaseModel):
-    staging_pending_threshold: int = Field(ge=1)
-    finalizer_interval_minutes: float = Field(ge=0.0)
 
 
 class DownloadConfig(BaseModel):
@@ -41,19 +35,22 @@ class ApkpureConfig(BaseModel):
     load_more_count: int = Field(default=0, ge=0, description="Number of Load More clicks per category; 0 = no limit")
 
 
+class UptodownConfig(BaseModel):
+    load_more_count: int = Field(default=1, ge=0, description="Number of category pages to load (page 1, 2, ...)")
+
+
 class DataConfig(BaseModel):
     storage: StorageConfig = Field()
     thread_pool: ThreadPoolConfig = Field()
-    finalizer: FinalizerConfig = Field()
     download: DownloadConfig = Field()
     logger: LoggerConfig = Field()
     browser: BrowserConfig = Field(default_factory=BrowserConfig)
     apkpure: ApkpureConfig = Field(default_factory=ApkpureConfig)
-    source_weights: dict[str, int] = Field()
+    uptodown: UptodownConfig = Field(default_factory=UptodownConfig)
     download_number: int = Field(
         default=0,
         ge=0,
-        description="Number of APKs to actually download per list; 0 = download all. Already-downloaded (in staging) are skipped and not counted.",
+        description="Number of APKs to actually download per list; 0 = download all. Already-downloaded (in platform index) are skipped and not counted.",
     )
 
     model_config = {"extra": "ignore"}

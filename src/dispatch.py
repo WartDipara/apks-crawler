@@ -1,12 +1,7 @@
-"""
-Dispatch Center: global thread pool for crawler tasks and graceful shutdown.
-All crawl work is submitted as tasks; SIGINT/SIGTERM triggers wait + cleanup then exit.
-"""
-
+# Controller of the crawler, submit fetch tasks, graceful shutdown, cleanup of partial files.
 import signal
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any, Callable, TypeVar
-
 from config import DataConfig
 
 T = TypeVar("T")
@@ -54,24 +49,20 @@ class Dispatch:
     def shutdown_timeout_seconds(self) -> float:
         return self._config.thread_pool.shutdown_timeout_seconds
 
+# Remove index entries whose apk file is missing or empty; delete orphan apk files.
+def cleanup_partial_files(storage: Any) -> None:
+    from src.storage.platform_storage import PlatformStorage
 
-def cleanup_partial_files(staging: Any) -> None:
-    """
-    Remove index entries whose APK file is missing or empty; delete orphan APK files
-    in staging so the file system stays consistent after interrupt.
-    """
-    from src.storage.staging import StagingStorage
-
-    if not isinstance(staging, StagingStorage):
+    if not isinstance(storage, PlatformStorage):
         return
-    index = staging.read_index()
+    index = storage.read_index()
     keys_to_remove: list[tuple[str, str]] = []
     for e in index:
         path_str = e.get("path") or ""
         if not path_str:
             keys_to_remove.append((e.get("app_id") or "", e.get("version") or ""))
             continue
-        path = staging.apk_path(path_str)
+        path = storage.apk_path(path_str)
         if not path.exists() or path.stat().st_size == 0:
             keys_to_remove.append((e.get("app_id") or "", e.get("version") or ""))
             if path.exists():
@@ -80,10 +71,10 @@ def cleanup_partial_files(staging: Any) -> None:
                 except OSError:
                     pass
     if keys_to_remove:
-        staging.clear_keys(keys_to_remove)
-    index = staging.read_index()
+        storage.clear_keys(keys_to_remove)
+    index = storage.read_index()
     paths_in_index = {e.get("path") for e in index if e.get("path")}
-    apks_dir = staging._paths.staging_apks_dir
+    apks_dir = storage._paths.apks_dir
     if not apks_dir.exists():
         return
     for f in apks_dir.iterdir():
@@ -97,7 +88,6 @@ def cleanup_partial_files(staging: Any) -> None:
 
 
 _instance: Dispatch | None = None
-
 
 def get_dispatch(config: DataConfig | None = None) -> Dispatch:
     global _instance

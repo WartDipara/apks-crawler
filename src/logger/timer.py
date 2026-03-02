@@ -1,4 +1,3 @@
-# start and end a timer with a message
 import time
 
 # time should save in local file

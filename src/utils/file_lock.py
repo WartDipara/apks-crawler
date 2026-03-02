@@ -1,6 +1,5 @@
 from contextlib import contextmanager
 from pathlib import Path
-
 from filelock import FileLock
 
 

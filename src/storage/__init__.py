@@ -1,5 +1,4 @@
 from .paths import StoragePaths, get_paths
-from .staging import StagingStorage
-from .main_storage import MainStorage
+from .platform_storage import PlatformStorage
 
-__all__ = ["StoragePaths", "get_paths", "StagingStorage", "MainStorage"]
+__all__ = ["StoragePaths", "get_paths", "PlatformStorage"]
