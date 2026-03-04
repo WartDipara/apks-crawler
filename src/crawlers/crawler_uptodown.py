@@ -1,11 +1,12 @@
 import re
 import time
+from collections.abc import Iterator
 from queue import Empty, Queue
-from threading import Thread
+from threading import Lock, Thread
 from urllib.parse import urljoin, urlparse
 from playwright.sync_api import sync_playwright
 from config import get_config
-from src.crawlers.base import BaseCrawler
+from src.crawlers.base import BaseCrawler, resolve_category_key
 from src.crawlers.common import (
     BROWSER_ARGS,
     USER_AGENT,
@@ -24,7 +25,7 @@ GAME_CATEGORIES = {
     "RPG": "rpg",
     "Strategy": "strategy",
     "Casual": "casual",
-    "Emulator": "emulator",
+    "Emulator": "emulators",
     "Arcade": "arcade",
     "Puzzle": "puzzle",
     "Sports": "sports",
@@ -37,7 +38,9 @@ GAME_CATEGORIES = {
     "NewReleases": "newreleases", # the latest released games.
     "TopDownloads": "top", # the most downloaded games
 }
-# Uptodown download page: <button id="detail-download-button" class="button download active">…<strong>Download</strong>…</button>; needs a short wait before click.
+
+
+# Uptodown download page, download button needs a short wait before click.
 DOWNLOAD_BTN_SELECTORS = [
     "button#detail-download-button",
     "button.download:has(strong:has-text('Download'))",
@@ -178,6 +181,61 @@ def _find_download_button(page):
             continue
     return None
 
+# True if the main download button is for the Uptodown client.
+def _is_uptodown_client_download_page(page) -> bool:
+    try:
+        # p.size under the main button contains "UPTODOWN app store" when button is client
+        size_el = page.locator("p.size").first
+        if size_el.count() and size_el.is_visible():
+            text = size_el.inner_text() or ""
+            if "UPTODOWN app store" in text:
+                return True
+        # or icon-logo-white-store.svg near the download area
+        icon = page.locator('img[src*="icon-logo-white-store.svg"]').first
+        if icon.count() and icon.is_visible():
+            return True
+    except Exception:
+        pass
+    return False
+
+# when current page is 'Uptodown client' download, redirect to the direct file download page.
+def _ensure_direct_download_page(page, download_page_url: str) -> bool:
+    current = (page.url or "").rstrip("/")
+    # already on -x page, nothing to do
+    if re.search(r"/download/\d+-x$", current):
+        return False
+    # URL has version id: .../download/{vid} -> .../download/{vid}-x
+    m = re.search(r"(.*/download)/(\d+)$", current)
+    if m:
+        base, vid = m.group(1), m.group(2)
+        page.goto(f"{base}/{vid}-x", wait_until="domcontentloaded", timeout=TIMEOUT_NAVIGATION_MS)
+        page.wait_for_load_state("load", timeout=TIMEOUT_LOAD_STATE_MS)
+        return True
+    # URL is .../download (no version id): open All variants panel and get first variant -x link
+    if not current.endswith("/download"):
+        return False
+    all_variants = page.locator('a:has-text("All variants"), button:has-text("All variants")').first
+    if all_variants.count() == 0:
+        return False
+    all_variants.click()
+    time.sleep(0.5)
+    page.wait_for_selector("#contentMenuPanel section.variants .variant", state="visible", timeout=TIMEOUT_SELECTOR_MS)
+    # get first variant's onclick -> location.href='.../download/123-x'
+    variant = page.locator("#contentMenuPanel section.variants .variant").first
+    onclick = variant.get_attribute("onclick") or ""
+    for child in variant.locator("[onclick]").all():
+        o = child.get_attribute("onclick") or ""
+        if "location.href" in o and "/download/" in o and "-x" in o:
+            onclick = o
+            break
+    match = re.search(r"location\.href\s*=\s*['\"]([^'\"]+/download/\d+-x)['\"]", onclick)
+    if not match:
+        return False
+    direct_url = match.group(1)
+    page.goto(direct_url, wait_until="domcontentloaded", timeout=TIMEOUT_NAVIGATION_MS)
+    page.wait_for_load_state("load", timeout=TIMEOUT_LOAD_STATE_MS)
+    return True
+
 
 class UptodownCrawler(BaseCrawler):
     def __init__(self, storage, logger):
@@ -213,6 +271,14 @@ class UptodownCrawler(BaseCrawler):
                 btn = _find_download_button(page)
                 if not btn:
                     raise CrawlerPageError("no download button on download page", source_name=self.source_name, app_id=app_id)
+                if _is_uptodown_client_download_page(page):
+                    if _ensure_direct_download_page(page, download_page_url):
+                        page.wait_for_selector("button#detail-download-button", state="visible", timeout=TIMEOUT_SELECTOR_MS)
+                        time.sleep(DOWNLOAD_BTN_WAIT_SEC)
+                        btn = _find_download_button(page)
+                        if not btn:
+                            raise CrawlerPageError("no download button after redirect to direct page", source_name=self.source_name, app_id=app_id)
+                        download_page_url = page.url
                 dl_href = btn.get_attribute("href")
                 if dl_href and (dl_href.endswith(".apk") or "d.uptodown" in dl_href):
                     if dl_href.startswith("//"):
@@ -270,6 +336,13 @@ class UptodownCrawler(BaseCrawler):
                     resolved_version = version_text or version or "latest"
                 else:
                     resolved_version = _get_version_from_download_page(page) or version or "latest"
+                if btn and _is_uptodown_client_download_page(page):
+                    if _ensure_direct_download_page(page, download_page_url):
+                        page.wait_for_selector("button#detail-download-button", state="visible", timeout=TIMEOUT_SELECTOR_MS)
+                        time.sleep(DOWNLOAD_BTN_WAIT_SEC)
+                        btn = _find_download_button(page)
+                        download_page_url = page.url
+                        resolved_version = _get_version_from_download_page(page) or resolved_version or version or "latest"
                 if not btn:
                     raise CrawlerPageError("no download button on download page", source_name=self.source_name, app_id=app_id)
                 index = self._storage.read_index()
@@ -282,7 +355,7 @@ class UptodownCrawler(BaseCrawler):
                         index_max[aid] = ver
                 stored = index_max.get(app_id)
                 if stored is not None and _version_ge(stored, resolved_version):
-                    self._logger.info(f'skip game="{app_id}" reason="Latest version already installed"')
+                    self._logger.warning(f'skip game="{app_id}" reason="Latest version already installed"')
                     return None
                 filename = self._apk_filename(app_id, resolved_version)
                 dest_path = self._storage.apk_path(filename)
@@ -318,6 +391,42 @@ class UptodownCrawler(BaseCrawler):
     def get_category_game_list(self, category: str) -> list[dict]:
         return get_full_game_list_for_category(category, include_versions=False)
 
+    def iter_category_pages_with_versions(self, category: str) -> Iterator[tuple[list[dict], bool]]:
+        resolved = resolve_category_key(category, GAME_CATEGORIES)
+        if resolved in GAME_CATEGORIES:
+            category_slug = GAME_CATEGORIES[resolved]
+        else:
+            category_slug = resolved.strip().lower().replace(" ", "-")
+        base_url = BASE.rstrip("/") + "/" + category_slug
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=get_config().browser.headless, args=BROWSER_ARGS)
+            try:
+                context = browser.new_context(
+                    user_agent=USER_AGENT,
+                    viewport={"width": 1920, "height": 1080},
+                    locale="en-US",
+                )
+                page = context.new_page()
+                pagenum = 1
+                while True:
+                    page_url = f"{base_url}/{pagenum}" if pagenum > 1 else base_url
+                    try:
+                        page.goto(page_url, wait_until="load", timeout=TIMEOUT_NAVIGATION_MS)
+                        time.sleep(2)
+                    except Exception:
+                        yield ([], True)
+                        return
+                    if _is_category_no_more_pages(page, pagenum):
+                        yield ([], True)
+                        return
+                    items = _parse_category_page_items(page, is_first_page=(pagenum == 1))
+                    if items:
+                        _fetch_versions_for_items(items)
+                    yield (items, False)
+                    pagenum += 1
+            finally:
+                browser.close()
+
 def _fetch_versions_worker(
     queue: Queue,
     results: list[str],
@@ -348,17 +457,164 @@ def _fetch_versions_worker(
             browser.close()
 
 
+def _fetch_versions_for_items(items: list[dict]) -> None:
+    n = len(items)
+    if n == 0:
+        return
+    results: list[str] = [""] * n
+    q: Queue = Queue()
+    for i, it in enumerate(items):
+        if it.get("game_url"):
+            q.put((i, it["game_url"]))
+    max_workers = get_config().thread_pool.max_workers
+    workers_count = min(max_workers, n)
+    workers_count = max(1, workers_count)
+    headless = get_config().browser.headless
+    threads = [
+        Thread(target=_fetch_versions_worker, args=(q, results, headless))
+        for _ in range(workers_count)
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    for i in range(n):
+        if results[i]:
+            items[i]["version"] = results[i]
+        elif items[i].get("game_url"):
+            items[i]["version"] = "latest"
+
+
+def _page_number_from_url(url: str) -> int:
+    try:
+        path = (urlparse(url).path or "").rstrip("/")
+        if not path:
+            return 1
+        last = path.split("/")[-1]
+        return int(last) if last.isdigit() else 1
+    except Exception:
+        return 1
+
+
+def _is_not_found_page(page) -> bool:
+    try:
+        loc = page.locator(".not-found")
+        if loc.count() > 0 and loc.first.is_visible():
+            return True
+        return False
+    except Exception:
+        return False
+
+# 2 situations: 404 or redirect back to a previous page . both means no more pages.
+def _is_category_no_more_pages(page, requested_pagenum: int) -> bool:
+    if _is_not_found_page(page):
+        return True
+    if requested_pagenum > 1:
+        actual_page = _page_number_from_url(page.url)
+        if actual_page < requested_pagenum:
+            return True
+    return False
+
+
+def _peek_page_worker(
+    base_url: str,
+    next_page_list: list[int],
+    claimed: set[int],
+    merged_pages: set[int],
+    all_items: list[dict],
+    seen_urls: set[str],
+    max_detected: list[bool],
+    max_page_value: list[int],
+    lock: Lock,
+    headless: bool,
+) -> None:
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=headless, args=BROWSER_ARGS)
+        try:
+            context = browser.new_context(
+                user_agent=USER_AGENT,
+                viewport={"width": 1920, "height": 1080},
+                locale="en-US",
+            )
+            page = context.new_page()
+            while True:
+                with lock:
+                    if max_detected[0] and next_page_list[0] > max_page_value[0]:
+                        return
+                    n = next_page_list[0]
+                    next_page_list[0] += 1
+                    claimed.add(n)
+                    if max_detected[0] and n > max_page_value[0]:
+                        return
+                page_url = f"{base_url}/{n}" if n > 1 else base_url
+                try:
+                    page.goto(page_url, wait_until="load", timeout=TIMEOUT_NAVIGATION_MS)
+                    time.sleep(2)
+                except Exception:
+                    with lock:
+                        max_detected[0] = True
+                        max_page_value[0] = max(1, n - 1)
+                    continue
+                if _is_not_found_page(page):
+                    with lock:
+                        max_detected[0] = True
+                        max_page_value[0] = max(1, n - 1)
+                    continue
+                actual_page = _page_number_from_url(page.url)
+                items = _parse_category_page_items(page, is_first_page=(actual_page == 1))
+                with lock:
+                    if actual_page not in merged_pages:
+                        merged_pages.add(actual_page)
+                        for it in items:
+                            url = it.get("game_url") or ""
+                            if url and url not in seen_urls:
+                                seen_urls.add(url)
+                                all_items.append(it)
+        finally:
+            browser.close()
+
+
 def get_full_game_list_for_category(category_key: str, include_versions: bool = True) -> list[dict]:
-    if category_key in GAME_CATEGORIES:
-        category_slug = GAME_CATEGORIES[category_key]
+    resolved = resolve_category_key(category_key, GAME_CATEGORIES)
+    if resolved in GAME_CATEGORIES:
+        category_slug = GAME_CATEGORIES[resolved]
     else:
-        category_slug = category_key.strip().lower().replace(" ", "-")
+        category_slug = resolved.strip().lower().replace(" ", "-")
     base_url = BASE.rstrip("/") + "/" + category_slug
-    max_pages = get_config().uptodown.load_more_count
-    if max_pages <= 0:
-        max_pages = 1
     all_items: list[dict] = []
     seen_urls: set[str] = set()
+    if not include_versions:
+        next_page_list: list[int] = [1]
+        claimed: set[int] = set()
+        merged_pages: set[int] = set()
+        max_detected: list[bool] = [False]
+        max_page_value: list[int] = [0]
+        lock = Lock()
+        headless = get_config().browser.headless
+        workers_count = max(1, get_config().thread_pool.max_workers)
+        threads = [
+            Thread(
+                target=_peek_page_worker,
+                args=(
+                    base_url,
+                    next_page_list,
+                    claimed,
+                    merged_pages,
+                    all_items,
+                    seen_urls,
+                    max_detected,
+                    max_page_value,
+                    lock,
+                    headless,
+                ),
+            )
+            for _ in range(workers_count)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        return all_items
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=get_config().browser.headless, args=BROWSER_ARGS)
         try:
@@ -368,18 +624,20 @@ def get_full_game_list_for_category(category_key: str, include_versions: bool = 
                 locale="en-US",
             )
             page = context.new_page()
-            for pagenum in range(1, max_pages + 1):
+            pagenum = 1
+            while True:
                 page_url = f"{base_url}/{pagenum}" if pagenum > 1 else base_url
                 page.goto(page_url, wait_until="load", timeout=TIMEOUT_NAVIGATION_MS)
                 time.sleep(2)
+                if _is_not_found_page(page):
+                    break
                 items = _parse_category_page_items(page, is_first_page=(pagenum == 1))
                 for it in items:
                     url = it.get("game_url") or ""
                     if url and url not in seen_urls:
                         seen_urls.add(url)
                         all_items.append(it)
-            if not include_versions:
-                return all_items
+                pagenum += 1
             n = len(all_items)
             results: list[str] = [""] * n
             q: Queue = Queue()

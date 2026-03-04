@@ -3,10 +3,22 @@ import time
 from concurrent.futures import FIRST_COMPLETED, Future, wait
 from typing import Any
 from config import get_config
-from src.crawlers.base import BaseCrawler
+from src.crawlers.base import BaseCrawler, resolve_category_key
+from src.crawlers.crawler_apkpure import GAME_CATEGORIES as APKPURE_CATEGORIES
+from src.crawlers.crawler_uptodown import GAME_CATEGORIES as UPTODOWN_CATEGORIES
 from src.logger import LogWriter, set_timer, calculate_time
 
 SOURCE_CHOICES = ("apkpure", "uptodown")
+
+
+def _categories_help_text() -> str:
+    apkpure_list = ", ".join(sorted(APKPURE_CATEGORIES.keys()))
+    uptodown_list = ", ".join(sorted(UPTODOWN_CATEGORIES.keys()))
+    return (
+        "Available categories (use with peek/pull):\n"
+        "  apkpure:  " + apkpure_list + "\n"
+        "  uptodown: " + uptodown_list
+    )
 
 def _version_ge(v1: str, v2: str) -> bool:
     # True if v1 >= v2. Used for skip: skip when stored >= list_version; re-download only when list_version > stored (v1 > v2). When equal, no re-download.
@@ -46,6 +58,13 @@ def _index_max_versions(index: list[dict]) -> dict[str, str]:
     return {aid: max(vers, key=version_key) for aid, vers in by_app.items()}
 
 
+def _console_stage(stage: str, app_id: str | None = None) -> None:
+    msg = f"Stage: {stage}"
+    if app_id:
+        msg += f" | app_id={app_id}"
+    print(msg, flush=True)
+
+
 def _run_one_fetch(
     logger: LogWriter,
     crawler: BaseCrawler,
@@ -54,6 +73,7 @@ def _run_one_fetch(
     slug: Any,
     game_url: Any = None,
 ) -> bool:
+    _console_stage("Downloading", app_id=app_id)
     logger.info(f"pull_fetch_start app_id={app_id} version={list_version}")
     try:
         kwargs = {"slug": slug}
@@ -62,15 +82,24 @@ def _run_one_fetch(
         resolved = crawler.fetch(app_id, list_version, **kwargs)
         version_log = resolved if resolved else list_version
         logger.info(f"pull_fetch_done app_id={app_id} version={version_log}")
+        if resolved is not None:
+            _console_stage("Download completed", app_id=app_id)
+        else:
+            _console_stage("Download skipped", app_id=app_id)
         return resolved is not None
     except Exception as e:
         logger.info(f"pull_skip app_id={app_id} version={list_version} error={e!r}")
+        _console_stage("Download skipped", app_id=app_id)
         return False
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="APK crawler (multi-source)")
+    parser = argparse.ArgumentParser(
+        description="APK crawler (multi-source). Use -h/--help to see available categories.",
+        epilog=_categories_help_text(),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     parser.add_argument(
-        "--source",
+        "-s", "--source",
         choices=SOURCE_CHOICES,
         required=True,
         help="Crawler source to use (e.g. apkpure, uptodown)",
@@ -78,16 +107,16 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     fetch_parser = subparsers.add_parser("fetch", help="Fetch one app by app_id, version and optional slug")
-    fetch_parser.add_argument("app_id", help="Application package id (e.g. com.example.app)")
+    fetch_parser.add_argument("app_id", help="Application package id (e.g. com.fxfxfx.app)")
     fetch_parser.add_argument("--version", required=True, help="Version to fetch")
     fetch_parser.add_argument("--slug", help="APKPure slug for direct page (e.g. blob-hero-app)")
 
-    peek_parser = subparsers.add_parser("peek", help="List games in a category (no download)")
-    peek_parser.add_argument("category", help="Category key or display name (e.g. game_action, Action)")
+    peek_parser = subparsers.add_parser("peek", help="List games in a category")
+    peek_parser.add_argument("category", help="Category key or display name (e.g. Action Kids)")
 
     pull_parser = subparsers.add_parser(
         "pull",
-        help="Download games in one or more categories; each category gets up to download_number downloads (skips not counted)",
+        help="Download games in one or more categories; each category gets up to download_number downloads",
     )
     pull_parser.add_argument(
         "categories",
@@ -96,6 +125,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     return parser
+
+
+def _validate_categories(parser: argparse.ArgumentParser, source: str, categories_input: list[str]) -> None:
+    categories = APKPURE_CATEGORIES if source == "apkpure" else UPTODOWN_CATEGORIES
+    available = ", ".join(sorted(categories.keys()))
+    for c in categories_input:
+        resolved = resolve_category_key(c, categories)
+        if resolved not in categories:
+            parser.error(f"Unknown category for {source}: {c!r}. Available: {available}")
+
+
+def validate_categories_for_command(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    cmd = getattr(args, "command", None)
+    if cmd == "peek":
+        _validate_categories(parser, args.source, [args.category])
+    elif cmd == "pull":
+        _validate_categories(parser, args.source, args.categories)
 
 
 def run(
@@ -120,10 +166,16 @@ def run(
     command_start = set_timer("command_start")
 
     if cmd == "fetch":
+        _console_stage("Downloading", app_id=args.app_id)
         kwargs = {"slug": args.slug} if args.slug else {}
-        crawler.fetch(args.app_id, args.version, **kwargs)
+        resolved = crawler.fetch(args.app_id, args.version, **kwargs)
+        if resolved is not None:
+            _console_stage("Download completed", app_id=args.app_id)
+        else:
+            _console_stage("Download skipped", app_id=args.app_id)
     elif cmd == "peek":
-        items = crawler.get_full_game_list(args.category)
+        _console_stage("Crawling (listing category)")
+        items = crawler.get_category_game_list(args.category)
         logger.info(f"peek category={args.category} count={len(items)}")
         for item in items:
             line = f"{item.get('app_id')}\t{item.get('version')}\t{item.get('slug', '')}"
@@ -132,28 +184,36 @@ def run(
         download_number = get_config().download_number
         if download_number > 0:
             logger.info(f"pull will download up to {download_number} per category (skips not counted)")
+        index_max = _index_max_versions(crawler._storage.read_index())
         for category in args.categories:
-            logger.info(f"pull_start category={category} fetching game list")
-            items = crawler.get_category_game_list(category)
-            logger.info(f"pull category={category} count={len(items)}")
-            for i, item in enumerate(items):
-                logger.info(
-                    f"pull_list category={category} index={i} app_id={item.get('app_id', '')} version={item.get('version', '')} "
-                    f"slug={item.get('slug', '')} game_url={item.get('game_url', '')}"
-                )
-            index_max = _index_max_versions(crawler._storage.read_index())
+            _console_stage("Crawling (fetching game list)")
+            logger.info(f"pull_start category={category} fetching game list (page by page until enough or 404)")
             to_fetch: list[tuple[str, str, Any, Any]] = []
-            for item in items:
-                app_id = item.get("app_id") or ""
-                list_version = (item.get("version") or "").strip()
-                slug = item.get("slug")
-                game_url = item.get("game_url")
-                if list_version:
-                    stored = index_max.get(app_id)
-                    if stored is not None and _version_ge(stored, list_version):
-                        logger.info(f'skip game="{app_id}" reason="Latest version already installed"')
-                        continue
-                to_fetch.append((app_id, list_version, slug, game_url))
+            hit_404 = False
+            for items, is_404 in crawler.iter_category_pages_with_versions(category):
+                hit_404 = is_404
+                for item in items:
+                    app_id = item.get("app_id") or ""
+                    list_version = (item.get("version") or "").strip()
+                    slug = item.get("slug")
+                    game_url = item.get("game_url")
+                    if list_version:
+                        stored = index_max.get(app_id)
+                        if stored is not None and _version_ge(stored, list_version):
+                            logger.warning(f'skip game="{app_id}" reason="Latest version already installed"')
+                            continue
+                    to_fetch.append((app_id, list_version, slug, game_url))
+                if download_number > 0 and len(to_fetch) >= download_number:
+                    break
+            if hit_404 and download_number > 0 and len(to_fetch) < download_number:
+                logger.info("no more new game need to download")
+            logger.info(f"pull category={category} count={len(to_fetch)}")
+            for i, item in enumerate(to_fetch):
+                app_id, list_version, slug, game_url = item
+                logger.info(
+                    f"pull_list category={category} index={i} app_id={app_id} version={list_version} "
+                    f"slug={slug or ''} game_url={game_url or ''}"
+                )
             logger.info(f"pull category={category} to_fetch count={len(to_fetch)}")
             if dispatch is not None:
                 dispatch.start()
@@ -161,10 +221,15 @@ def run(
                 it = iter(to_fetch)
                 in_flight: list[Future[bool]] = []
                 timeout_sec = dispatch.shutdown_timeout_seconds
+                max_concurrent = get_config().thread_pool.max_workers
+                if download_number > 0:
+                    max_concurrent = min(download_number, max_concurrent)
                 while True:
-                    while len(in_flight) < (get_config().thread_pool.max_workers) and not dispatch.shutdown_requested:
-                        if download_number > 0 and downloaded_count >= download_number:
-                            break
+                    while (
+                        len(in_flight) < max_concurrent
+                        and (download_number == 0 or downloaded_count + len(in_flight) < download_number)
+                        and not dispatch.shutdown_requested
+                    ):
                         try:
                             app_id, list_version, slug, game_url = next(it)
                         except StopIteration:
@@ -206,3 +271,4 @@ def run(
 
     duration = calculate_time(command_start, time.time())
     logger.info(f"command_end {cmd_args} duration_seconds={duration:.3f}")
+    _console_stage("completed")

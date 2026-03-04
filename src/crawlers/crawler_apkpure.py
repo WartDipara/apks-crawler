@@ -3,7 +3,7 @@ import time
 from pathlib import Path
 from playwright.sync_api import sync_playwright
 from config import get_config
-from src.crawlers.base import BaseCrawler
+from src.crawlers.base import BaseCrawler, resolve_category_key
 from src.crawlers.common import (
     BROWSER_ARGS,
     USER_AGENT,
@@ -307,7 +307,7 @@ def _parse_category_page_items(page) -> list[dict]:
 
 def _scroll_to_bottom(page) -> None:
     page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-    time.sleep(0.5)
+    time.sleep(0.2)
 
 
 def _click_load_more(page) -> bool:
@@ -319,9 +319,9 @@ def _click_load_more(page) -> bool:
             if not btn.is_visible():
                 continue
             btn.scroll_into_view_if_needed()
-            time.sleep(0.5)
+            time.sleep(0.2)
             btn.click()
-            time.sleep(2)
+            time.sleep(0.5)
             return True
         except Exception:
             continue
@@ -447,8 +447,11 @@ class APKPureCrawler(BaseCrawler):
 
 
 def discover_latest_in_category(category_key: str) -> list[dict]:
-    if category_key in GAME_CATEGORIES:
-        category_key = GAME_CATEGORIES[category_key]
+    resolved = resolve_category_key(category_key, GAME_CATEGORIES)
+    if resolved in GAME_CATEGORIES:
+        category_key = GAME_CATEGORIES[resolved]
+    else:
+        category_key = resolved
     base_url = f"{BASE.rstrip('/')}/{category_key}"
     headless = get_config().browser.headless
     with sync_playwright() as p:
@@ -471,16 +474,16 @@ def discover_latest_in_category(category_key: str) -> list[dict]:
             browser.close()
 
 
-# Get full game list; count from config.apkpure.load_more_count(0 is no limit). 
-# Flow: category -> Latest tab -> scroll to bottom -> [parse items -> scroll to bottom -> click Load More -> scroll to bottom] repeat.
+# Get full game list: Latest tab -> scroll to bottom -> [parse items -> scroll to bottom -> click Show More/Load More -> scroll] until button disappears.
 def get_full_game_list_for_category(category_key: str) -> list[dict]:
-    if category_key in GAME_CATEGORIES:
-        category_key = GAME_CATEGORIES[category_key]
+    resolved = resolve_category_key(category_key, GAME_CATEGORIES)
+    if resolved in GAME_CATEGORIES:
+        category_key = GAME_CATEGORIES[resolved]
+    else:
+        category_key = resolved
     base_url = f"{BASE.rstrip('/')}/{category_key}"
-    max_load_more = get_config().apkpure.load_more_count
     all_items: list[dict] = []
     seen_app_ids: set[str] = set()
-    load_more_count = 0
     headless = get_config().browser.headless
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=headless, args=BROWSER_ARGS)
@@ -505,12 +508,9 @@ def get_full_game_list_for_category(category_key: str) -> list[dict]:
                     if aid and aid not in seen_app_ids:
                         seen_app_ids.add(aid)
                         all_items.append(it)
-                if max_load_more and load_more_count >= max_load_more:
-                    break
                 _scroll_to_bottom(page)
                 if not _click_load_more(page):
                     break
-                load_more_count += 1
                 _scroll_to_bottom(page)
             return all_items
         finally:

@@ -1,10 +1,23 @@
 from abc import ABC, abstractmethod
+from collections.abc import Iterator
 from src.logger import LogWriter
 from src.storage import PlatformStorage
 
 
 def _sanitize_filename(s: str) -> str:
     return "".join(c if c.isalnum() or c in "._-" else "_" for c in s)
+
+
+def resolve_category_key(name: str, categories: dict[str, str]) -> str:
+    """Resolve user input to a category dict key (case-insensitive). Returns canonical key or stripped name."""
+    if not name:
+        return name
+    s = name.strip()
+    lower = s.lower()
+    for k in categories:
+        if k.lower() == lower:
+            return k
+    return s
 
 
 class BaseCrawler(ABC):
@@ -33,3 +46,7 @@ class BaseCrawler(ABC):
     def get_category_game_list(self, category: str) -> list[dict]:
         """List games in category without fetching per-game details (e.g. versions). For peek."""
         return self.get_full_game_list(category)
+
+    def iter_category_pages_with_versions(self, category: str) -> Iterator[tuple[list[dict], bool]]:
+        """Yield (items_with_versions, hit_404) per page. When hit_404=True, no more pages. Default: one batch (full list)."""
+        yield (self.get_full_game_list(category), True)

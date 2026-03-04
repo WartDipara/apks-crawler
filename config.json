@@ -15,13 +15,9 @@
     "dir_name": "logs"
   },
   "browser": {
-    "headless": true
+    "headless": false
   },
-  "apkpure": {
-    "load_more_count": 2
-  },
-  "uptodown": {
-    "load_more_count": 5
-  },
-  "download_number": 3
+  "apkpure": {},
+  "uptodown": {},
+  "download_number": 5
 }

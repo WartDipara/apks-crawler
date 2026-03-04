@@ -10,7 +10,7 @@ python main.py --source <apkpure|uptodown> <command> [args...]
 
 **Requirements:** Python 3.x, dependencies in `requirements.txt`. For browser-based crawl, activate your env (e.g. `conda activate OvO`) so Playwright is available.
 
-**Config:** Edit `config.json` to set storage root, `download_number`, `browser.headless`, platform options (`apkpure.load_more_count`, `uptodown.load_more_count`), etc.
+**Config:** Edit `config.json` to set storage root, `download_number`, `browser.headless`, etc.
 
 ---
 

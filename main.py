@@ -8,7 +8,7 @@ from src.crawlers import APKPureCrawler, UptodownCrawler
 from src.dispatch import cleanup_partial_files, get_dispatch, init_dispatch
 from src.logger import LogWriter, set_timer, calculate_time
 from src.storage import PlatformStorage, get_paths
-from src.utils.cli import SOURCE_CHOICES, build_parser, run
+from src.utils.cli import SOURCE_CHOICES, build_parser, run, validate_categories_for_command
 
 
 def _crawler_for_source(source: str, storage: PlatformStorage, logger: LogWriter):
@@ -22,6 +22,7 @@ def _crawler_for_source(source: str, storage: PlatformStorage, logger: LogWriter
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
+    validate_categories_for_command(parser, args)
 
     config = get_config(Path("config.json"))
     paths = get_paths(config, platform=args.source)
@@ -36,6 +37,7 @@ def main() -> None:
     script_start = set_timer("script_start")
     logger.info("script_start")
     logger.info(f"source={args.source}")
+    print("Stage: Starting", flush=True)
 
     crawler = _crawler_for_source(args.source, storage, logger)
     try:
@@ -43,10 +45,10 @@ def main() -> None:
         cleanup_partial_files(storage)
         dispatch.shutdown()
     except KeyboardInterrupt:
-        logger.info("interrupted cleanup_start")
+        logger.error("interrupted cleanup_start")
         cleanup_partial_files(storage)
         dispatch.shutdown(wait=False, cancel_futures=True)
-        logger.info("interrupted cleanup_end")
+        logger.error("interrupted cleanup_end")
         sys.exit(0)
 
     duration = calculate_time(script_start, time.time())
@@ -55,4 +57,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-    print("Finished. For more details, check the logs in the data/logs directory.")
+    print("For more details, check the logs in the data/logs directory.", flush=True)

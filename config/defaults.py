@@ -32,11 +32,11 @@ class BrowserConfig(BaseModel):
 
 
 class ApkpureConfig(BaseModel):
-    load_more_count: int = Field(default=0, ge=0, description="Number of Load More clicks per category; 0 = no limit")
+    pass
 
 
 class UptodownConfig(BaseModel):
-    load_more_count: int = Field(default=1, ge=0, description="Number of category pages to load (page 1, 2, ...)")
+    pass
 
 
 class DataConfig(BaseModel):
